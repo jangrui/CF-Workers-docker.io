@@ -5,6 +5,10 @@ let hub_host = 'registry-1.docker.io';
 // Docker认证服务器地址
 const auth_url = 'https://auth.docker.io';
 
+const FREE_DOMAINS = [
+	'r2.cloudflarestorage.com',
+];
+
 let 屏蔽爬虫UA = ['netcraft'];
 
 // 根据主机名选择对应的上游地址
@@ -19,7 +23,8 @@ function routeByHosts(host) {
 		"ghcr": "ghcr.io",
 		"cloudsmith": "docker.cloudsmith.io",
 		"nvcr": "nvcr.io",
-
+		
+		"budibase": "budibase.docker.scarf.sh",
 		// 测试环境
 		"test": "registry-1.docker.io",
 	};
@@ -577,8 +582,19 @@ export default {
 				}
 				if (new_response_headers.get("Location")) {
 					const location = new_response_headers.get("Location");
-					console.info(`Found redirection location, redirecting to ${location}`);
-					return httpHandler(request, location, hub_host);
+					console.info(`Found redirection location ${location}`);
+					let freeDomain = false;
+					for (const domain of FREE_DOMAINS) {
+						if (location.match('\\b' + domain + '\\b')) {
+							freeDomain = true;
+							console.log(`Free domain ${domain}, redirect as is.`);
+							break;
+						}
+					}
+					if (!freeDomain) {
+						console.log('Not free domain, re-executing...');
+						return httpHandler(request, location, hub_host);
+					}
 				}
 				let response = new Response(original_text, {
 					status,
@@ -590,15 +606,7 @@ export default {
 
 		// 构造请求参数
 		let parameter = {
-			headers: {
-				'Host': hub_host,
-				'User-Agent': getReqHeader("User-Agent"),
-				'Accept': getReqHeader("Accept"),
-				'Accept-Language': getReqHeader("Accept-Language"),
-				'Accept-Encoding': getReqHeader("Accept-Encoding"),
-				'Connection': 'keep-alive',
-				'Cache-Control': 'max-age=0'
-			},
+			headers: new Headers(response.headers),
 			cacheTtl: 3600 // 缓存时间
 		};
 
