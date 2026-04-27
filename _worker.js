@@ -29,6 +29,21 @@ function routeByHosts(host) {
 	else return [hub_host, true];
 }
 
+// 根据注册表获取认证配置
+function getAuthForRegistry(hub_host) {
+	const configs = {
+		'registry-1.docker.io': { url: 'https://auth.docker.io', host: 'auth.docker.io', service: 'registry.docker.io', path: '/token' },
+		'ghcr.io': { url: 'https://ghcr.io', host: 'ghcr.io', service: 'ghcr.io', path: '/token' },
+		'gcr.io': { url: 'https://gcr.io', host: 'gcr.io', service: 'gcr.io', path: '/v2/token' },
+		'k8s.gcr.io': { url: 'https://k8s.gcr.io', host: 'k8s.gcr.io', service: 'k8s.gcr.io', path: '/v2/token' },
+		'registry.k8s.io': { url: 'https://registry.k8s.io', host: 'registry.k8s.io', service: 'registry.k8s.io', path: '/v2/token' },
+		'quay.io': { url: 'https://quay.io', host: 'quay.io', service: 'quay.io', path: '/v2/auth' },
+		'nvcr.io': { url: 'https://nvcr.io', host: 'nvcr.io', service: 'nvcr.io', path: '/v2/auth' },
+		'docker.cloudsmith.io': { url: 'https://docker.cloudsmith.io', host: 'docker.cloudsmith.io', service: 'docker.cloudsmith.io', path: '/v2/auth' },
+	};
+	return configs[hub_host] || configs['registry-1.docker.io'];
+}
+
 /** @type {RequestInit} */
 const PREFLIGHT_INIT = {
 	// 预检请求配置
@@ -497,9 +512,10 @@ export default {
 
 		// 处理token请求
 		if (url.pathname.includes('/token')) {
+			const authConfig = getAuthForRegistry(hub_host);
 			let token_parameter = {
 				headers: {
-					'Host': 'auth.docker.io',
+					'Host': authConfig.host,
 					'User-Agent': getReqHeader("User-Agent"),
 					'Accept': getReqHeader("Accept"),
 					'Accept-Language': getReqHeader("Accept-Language"),
@@ -508,7 +524,7 @@ export default {
 					'Cache-Control': 'max-age=0'
 				}
 			};
-			let token_url = auth_url + url.pathname + url.search;
+			let token_url = authConfig.url + url.pathname + url.search;
 			return fetch(new Request(token_url, request), token_parameter);
 		}
 
@@ -536,7 +552,8 @@ export default {
 				repo = v2Match[1];
 			}
 			if (repo) {
-				const tokenUrl = `${auth_url}/token?service=registry.docker.io&scope=repository:${repo}:pull`;
+				const authConfig = getAuthForRegistry(hub_host);
+				const tokenUrl = `${authConfig.url}${authConfig.path}?service=${authConfig.service}&scope=repository:${repo}:pull`;
 				const tokenRes = await fetch(tokenUrl, {
 					headers: {
 						'User-Agent': getReqHeader("User-Agent"),
@@ -573,8 +590,9 @@ export default {
 				let status = original_response.status;
 				if (new_response_headers.get("Www-Authenticate")) {
 					let auth = new_response_headers.get("Www-Authenticate");
-					let re = new RegExp(auth_url, 'g');
-					new_response_headers.set("Www-Authenticate", response_headers.get("Www-Authenticate").replace(re, workers_url));
+					const authConfig = getAuthForRegistry(hub_host);
+					auth = auth.replace(new RegExp(authConfig.url, 'g'), workers_url);
+					new_response_headers.set("Www-Authenticate", auth);
 				}
 				if (new_response_headers.get("Location")) {
 					const location = new_response_headers.get("Location");
@@ -616,8 +634,9 @@ export default {
 		// 修改 Www-Authenticate 头
 		if (new_response_headers.get("Www-Authenticate")) {
 			let auth = new_response_headers.get("Www-Authenticate");
-			let re = new RegExp(auth_url, 'g');
-			new_response_headers.set("Www-Authenticate", response_headers.get("Www-Authenticate").replace(re, workers_url));
+			const authConfig = getAuthForRegistry(hub_host);
+			auth = auth.replace(new RegExp(authConfig.url, 'g'), workers_url);
+			new_response_headers.set("Www-Authenticate", auth);
 		}
 
 		// 处理重定向
