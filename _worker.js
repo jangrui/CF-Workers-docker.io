@@ -1,11 +1,22 @@
 // _worker.js
 
 // Docker镜像仓库主机地址
-let hub_host = 'registry-1.docker.io';
+const DEFAULT_HUB_HOST = 'registry-1.docker.io';
 // Docker认证服务器地址
 const auth_url = 'https://auth.docker.io';
 
-let 屏蔽爬虫UA = ['netcraft'];
+const DEFAULT_BLOCKED_UA = ['netcraft'];
+// 允许通过 ns 参数指定的上游仓库（白名单，避免被当作任意主机的代理）
+const ALLOWED_UPSTREAMS = new Set([
+	DEFAULT_HUB_HOST,
+	'quay.io',
+	'gcr.io',
+	'k8s.gcr.io',
+	'registry.k8s.io',
+	'ghcr.io',
+	'docker.cloudsmith.io',
+	'nvcr.io',
+]);
 
 // 根据主机名选择对应的上游地址
 function routeByHosts(host) {
@@ -14,7 +25,8 @@ function routeByHosts(host) {
 		// 生产环境
 		"quay": "quay.io",
 		"gcr": "gcr.io",
-		"k8s-gcr": "k8s.gcr.io",
+		// k8s.gcr.io 已整体 302 到 registry.k8s.io，直接指向目标上游可避免跨主机重定向时丢失凭据
+		"k8s-gcr": "registry.k8s.io",
 		"k8s": "registry.k8s.io",
 		"ghcr": "ghcr.io",
 		"fake-ghcr": "ghcr.io",
@@ -26,7 +38,7 @@ function routeByHosts(host) {
 	};
 
 	if (host in routes) return [routes[host], false];
-	else return [hub_host, true];
+	else return [DEFAULT_HUB_HOST, true];
 }
 
 // 根据注册表获取认证配置
@@ -35,11 +47,11 @@ function getAuthForRegistry(hub_host) {
 		'registry-1.docker.io': { url: 'https://auth.docker.io', host: 'auth.docker.io', service: 'registry.docker.io', path: '/token' },
 		'ghcr.io': { url: 'https://ghcr.io', host: 'ghcr.io', service: 'ghcr.io', path: '/token' },
 		'gcr.io': { url: 'https://gcr.io', host: 'gcr.io', service: 'gcr.io', path: '/v2/token' },
-		'k8s.gcr.io': { url: 'https://k8s.gcr.io', host: 'k8s.gcr.io', service: 'k8s.gcr.io', path: '/v2/token' },
-		'registry.k8s.io': { url: 'https://registry.k8s.io', host: 'registry.k8s.io', service: 'registry.k8s.io', path: '/v2/token' },
+		'k8s.gcr.io': { url: 'https://registry.k8s.io', host: 'registry.k8s.io', service: 'registry', path: '/token' },
+		'registry.k8s.io': { url: 'https://registry.k8s.io', host: 'registry.k8s.io', service: 'registry', path: '/token' },
 		'quay.io': { url: 'https://quay.io', host: 'quay.io', service: 'quay.io', path: '/v2/auth' },
-		'nvcr.io': { url: 'https://nvcr.io', host: 'nvcr.io', service: 'nvcr.io', path: '/v2/auth' },
-		'docker.cloudsmith.io': { url: 'https://docker.cloudsmith.io', host: 'docker.cloudsmith.io', service: 'docker.cloudsmith.io', path: '/v2/auth' },
+		'nvcr.io': { url: 'https://nvcr.io', host: 'nvcr.io', service: 'registry', path: '/token' },
+		'docker.cloudsmith.io': { url: 'https://docker.cloudsmith.io', host: 'docker.cloudsmith.io', service: 'docker.cloudsmith.io', path: '/login' },
 	};
 	return configs[hub_host] || configs['registry-1.docker.io'];
 }
@@ -72,7 +84,6 @@ function makeRes(body, status = 200, headers = {}) {
  */
 function newUrl(urlStr, base) {
 	try {
-		console.log(`Constructing new URL object with path ${urlStr} and base ${base}`);
 		return new URL(urlStr, base); // 尝试构造新的URL对象
 	} catch (err) {
 		console.error(err);
@@ -431,10 +442,13 @@ export default {
 	async fetch(request, env, ctx) {
 		const getReqHeader = (key) => request.headers.get(key); // 获取请求头
 
+		// 每个请求独立的局部状态，避免 isolate 内跨请求串扰
+		let hub_host = DEFAULT_HUB_HOST;
+		let 屏蔽爬虫UA = DEFAULT_BLOCKED_UA;
+		if (env.UA) 屏蔽爬虫UA = 屏蔽爬虫UA.concat(await ADD(env.UA));
 		let url = new URL(request.url); // 解析请求URL
 		const userAgentHeader = request.headers.get('User-Agent');
 		const userAgent = userAgentHeader ? userAgentHeader.toLowerCase() : "null";
-		if (env.UA) 屏蔽爬虫UA = 屏蔽爬虫UA.concat(await ADD(env.UA));
 		const workers_url = `https://${url.hostname}`;
 
 		// 获取请求参数中的 ns
@@ -445,18 +459,18 @@ export default {
 		let checkHost; // 在这里定义 checkHost 变量
 		// 如果存在 ns 参数，优先使用它来确定 hub_host
 		if (ns) {
-			if (ns === 'docker.io') {
-				hub_host = 'registry-1.docker.io'; // 设置上游地址为 registry-1.docker.io
-			} else {
-				hub_host = ns; // 直接使用 ns 作为 hub_host
+			// 仅允许白名单内的上游仓库
+			const nsHost = ns === 'docker.io' ? DEFAULT_HUB_HOST : ns;
+			if (!ALLOWED_UPSTREAMS.has(nsHost)) {
+				return new Response('unsupported upstream', { status: 400 });
 			}
+			hub_host = nsHost;
 		} else {
 			checkHost = routeByHosts(hostTop);
 			hub_host = checkHost[0]; // 获取上游地址
 		}
 
 		const fakePage = checkHost ? checkHost[1] : false; // 确保 fakePage 不为 undefined
-		console.log(`域名头部: ${hostTop} 反代地址: ${hub_host} searchInterface: ${fakePage}`);
 		// 更改请求的主机名
 		url.hostname = hub_host;
 		const hubParams = ['/v1/search', '/v1/repositories'];
@@ -507,7 +521,6 @@ export default {
 		if (!/%2F/.test(url.search) && /%3A/.test(url.toString())) {
 			let modifiedUrl = url.toString().replace(/%3A(?=.*?&)/, '%3Alibrary%2F');
 			url = new URL(modifiedUrl);
-			console.log(`handle_url: ${url}`);
 		}
 
 		// 处理token请求
@@ -515,15 +528,16 @@ export default {
 			const authConfig = getAuthForRegistry(hub_host);
 			let token_parameter = {
 				headers: {
-					'Host': authConfig.host,
 					'User-Agent': getReqHeader("User-Agent"),
 					'Accept': getReqHeader("Accept"),
 					'Accept-Language': getReqHeader("Accept-Language"),
-					'Accept-Encoding': getReqHeader("Accept-Encoding"),
-					'Connection': 'keep-alive',
 					'Cache-Control': 'max-age=0'
 				}
 			};
+			// 转发客户端凭据（docker login 的 Basic 或已有 token）：私有镜像与按账号计数的拉取限额都依赖它
+			if (request.headers.has("Authorization")) {
+				token_parameter.headers['Authorization'] = getReqHeader("Authorization");
+			}
 			let token_url = authConfig.url + url.pathname + url.search;
 			return fetch(new Request(token_url, request), token_parameter);
 		}
@@ -532,7 +546,6 @@ export default {
 		if (hub_host == 'registry-1.docker.io' && /^\/v2\/[^/]+\/[^/]+\/[^/]+$/.test(url.pathname) && !/^\/v2\/library/.test(url.pathname)) {
 			//url.pathname = url.pathname.replace(/\/v2\//, '/v2/library/');
 			url.pathname = '/v2/library/' + url.pathname.split('/v2/')[1];
-			console.log(`modified_url: ${url.pathname}`);
 		}
 
 		// 新增：/v2/、/manifests/、/blobs/、/tags/ 先获取token再请求
@@ -554,30 +567,32 @@ export default {
 			if (repo) {
 				const authConfig = getAuthForRegistry(hub_host);
 				const tokenUrl = `${authConfig.url}${authConfig.path}?service=${authConfig.service}&scope=repository:${repo}:pull`;
-				const tokenRes = await fetch(tokenUrl, {
-					headers: {
-						'User-Agent': getReqHeader("User-Agent"),
-						'Accept': getReqHeader("Accept"),
-						'Accept-Language': getReqHeader("Accept-Language"),
-						'Accept-Encoding': getReqHeader("Accept-Encoding"),
-						'Connection': 'keep-alive',
-						'Cache-Control': 'max-age=0'
+				// 客户端自带凭据时原样转发（兼容私有镜像）；否则申请匿名 pull token
+				let upstreamAuth = getReqHeader("Authorization");
+				if (!upstreamAuth) {
+					const tokenRes = await fetch(tokenUrl, {
+						headers: {
+							'User-Agent': getReqHeader("User-Agent"),
+							'Accept': 'application/json',
+							'Cache-Control': 'max-age=0'
+						}
+					});
+					const tokenData = tokenRes.ok ? await tokenRes.json().catch(() => null) : null;
+					const token = tokenData?.token || tokenData?.access_token;
+					if (!token) {
+						console.error(`获取匿名 token 失败: ${authConfig.url}${authConfig.path} 返回 ${tokenRes.status}`);
+						return new Response('auth upstream error', { status: 502 });
 					}
-				});
-				const tokenData = await tokenRes.json();
-				const token = tokenData.token;
+					upstreamAuth = `Bearer ${token}`;
+				}
 				let parameter = {
 					headers: {
-						'Host': hub_host,
 						'User-Agent': getReqHeader("User-Agent"),
 						'Accept': getReqHeader("Accept"),
 						'Accept-Language': getReqHeader("Accept-Language"),
-						'Accept-Encoding': getReqHeader("Accept-Encoding"),
-						'Connection': 'keep-alive',
 						'Cache-Control': 'max-age=0',
-						'Authorization': `Bearer ${token}`
-					},
-					cacheTtl: 3600
+						'Authorization': upstreamAuth
+					}
 				};
 				if (request.headers.has("X-Amz-Content-Sha256")) {
 					parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
@@ -595,9 +610,8 @@ export default {
 					new_response_headers.set("Www-Authenticate", auth);
 				}
 				if (new_response_headers.get("Location")) {
-					const location = new_response_headers.get("Location");
-					console.info(`Found redirection location, redirecting to ${location}`);
-					return httpHandler(request, location, hub_host);
+				const location = new_response_headers.get("Location");
+				return httpHandler(request, location, hub_host);
 				}
 				let response = new Response(original_text, {
 					status,
@@ -607,21 +621,13 @@ export default {
 			}
 		}
 
-		// 构造请求参数
-		let parameter = {
-			headers: new Headers(request.headers),
-			cacheTtl: 3600 // 缓存时间
-		};
-
-		// 添加Authorization头
-		if (request.headers.has("Authorization")) {
-			parameter.headers.Authorization = getReqHeader("Authorization");
+		// 构造请求参数：只透传业务所需的请求头（cacheTtl 需写在 cf 对象内才生效，本脚本不做缓存，故移除）
+		const parameter = { headers: new Headers() };
+		for (const name of ['User-Agent', 'Accept', 'Accept-Language', 'Content-Type', 'Authorization', 'X-Amz-Content-Sha256']) {
+			const value = getReqHeader(name);
+			if (value) parameter.headers.set(name, value);
 		}
-
-		// 添加可能存在字段X-Amz-Content-Sha256
-		if (request.headers.has("X-Amz-Content-Sha256")) {
-			parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
-		}
+		parameter.headers.set('Cache-Control', 'max-age=0');
 
 		// 发起请求并处理响应
 		let original_response = await fetch(new Request(url, request), parameter);
@@ -642,7 +648,6 @@ export default {
 		// 处理重定向
 		if (new_response_headers.get("Location")) {
 			const location = new_response_headers.get("Location");
-			console.info(`Found redirection location, redirecting to ${location}`);
 			return httpHandler(request, location, hub_host);
 		}
 
