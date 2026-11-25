@@ -523,15 +523,17 @@ export default {
 			const authConfig = getAuthForRegistry(hub_host);
 			let token_parameter = {
 				headers: {
-					'User-Agent': getReqHeader("User-Agent"),
-					'Accept': getReqHeader("Accept"),
-					'Accept-Language': getReqHeader("Accept-Language"),
+					// 缺省值用 */*：客户端没带 Accept 时不能透传成字面量 "null"（ghcr.io 会因此挂起）
+					'Accept': getReqHeader("Accept") || '*/*',
 					'Cache-Control': 'max-age=0'
 				}
 			};
-			// 转发客户端凭据（docker login 的 Basic 或已有 token）：私有镜像与按账号计数的拉取限额都依赖它
-			if (request.headers.has("Authorization")) {
-				token_parameter.headers['Authorization'] = getReqHeader("Authorization");
+			// 只透传客户端实际带来的头；其中 Authorization（docker login 的 Basic 或已有 token）
+			// 是私有镜像与按账号计数的拉取限额所依赖的
+			for (const name of ['User-Agent', 'Accept-Language', 'Authorization']) {
+				if (request.headers.has(name)) {
+					token_parameter.headers[name] = getReqHeader(name);
+				}
 			}
 			let token_url = authConfig.url + url.pathname + url.search;
 			return fetch(new Request(token_url, request), token_parameter);
@@ -567,7 +569,7 @@ export default {
 				if (!upstreamAuth) {
 					const tokenRes = await fetch(tokenUrl, {
 						headers: {
-							'User-Agent': getReqHeader("User-Agent"),
+							...(getReqHeader("User-Agent") ? { 'User-Agent': getReqHeader("User-Agent") } : {}),
 							'Accept': 'application/json',
 							'Cache-Control': 'max-age=0'
 						}
@@ -582,15 +584,16 @@ export default {
 				}
 				let parameter = {
 					headers: {
-						'User-Agent': getReqHeader("User-Agent"),
-						'Accept': getReqHeader("Accept"),
-						'Accept-Language': getReqHeader("Accept-Language"),
+						'Accept': getReqHeader("Accept") || '*/*', // 同上：缺省时不要透传成字面量 "null"
 						'Cache-Control': 'max-age=0',
 						'Authorization': upstreamAuth
 					}
 				};
-				if (request.headers.has("X-Amz-Content-Sha256")) {
-					parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
+				// 只透传客户端实际带来的头
+				for (const name of ['User-Agent', 'Accept-Language', 'X-Amz-Content-Sha256']) {
+					if (request.headers.has(name)) {
+						parameter.headers[name] = getReqHeader(name);
+					}
 				}
 				let original_response = await fetch(new Request(url, request), parameter);
 				let original_response_clone = original_response.clone();
