@@ -416,7 +416,8 @@ async function searchInterface() {
 		function performSearch() {
 			const query = document.getElementById('search-input').value;
 			if (query) {
-				window.location.href = '/search?q=' + encodeURIComponent(query);
+				// 搜索结果直接打开 Docker Hub 官网，不再反代 hub.docker.com 的页面
+				window.open('https://hub.docker.com/search?q=' + encodeURIComponent(query), '_blank', 'noopener');
 			}
 		}
 	
@@ -473,7 +474,6 @@ export default {
 		const fakePage = checkHost ? checkHost[1] : false; // 确保 fakePage 不为 undefined
 		// 更改请求的主机名
 		url.hostname = hub_host;
-		const hubParams = ['/v1/search', '/v1/repositories'];
 		if (屏蔽爬虫UA.some(fxxk => userAgent.includes(fxxk)) && 屏蔽爬虫UA.length > 0) {
 			// 首页改成一个nginx伪装页
 			return new Response(await nginx(), {
@@ -481,7 +481,8 @@ export default {
 					'Content-Type': 'text/html; charset=UTF-8',
 				},
 			});
-		} else if ((userAgent && userAgent.includes('mozilla')) || hubParams.some(param => url.pathname.includes(param))) {
+		} else if (userAgent && userAgent.includes('mozilla')) {
+			// 浏览器访问非根路径时不再反代上游网页（hub.docker.com、ghcr.io 等），统一交给下面的 Registry API 处理
 			if (url.pathname == '/') {
 				if (env.URL302) {
 					return Response.redirect(env.URL302, 302);
@@ -501,20 +502,14 @@ export default {
 						},
 					});
 				}
-			} else {
-				// 新增逻辑：/v1/ 路径特殊处理
-				if (url.pathname.startsWith('/v1/')) {
-					url.hostname = 'index.docker.io';
-				} else if (fakePage) {
-					url.hostname = 'hub.docker.com';
-				}
-				if (url.searchParams.get('q')?.includes('library/') && url.searchParams.get('q') != 'library/') {
-					const search = url.searchParams.get('q');
-					url.searchParams.set('q', search.replace('library/', ''));
-				}
-				const newRequest = new Request(url, request);
-				return fetch(newRequest);
 			}
+		}
+
+		// 只代理 Registry API；其它路径（上游网页、登录页等）一律 404，避免把他人品牌的页面挂在本域名下
+		const isApiPath = url.pathname.startsWith('/v2/') || url.pathname.startsWith('/v1/') ||
+			url.pathname.endsWith('/token') || (url.pathname === '/login' && hub_host === 'docker.cloudsmith.io');
+		if (!isApiPath) {
+			return new Response('Not Found', { status: 404 });
 		}
 
 		// 修改包含 %2F 和 %3A 的请求
